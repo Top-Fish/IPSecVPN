@@ -1,0 +1,159 @@
+#! /bin/sh
+# user interface to automatic keying and Pluto in general
+# Copyright (C) 1998, 1999, 2000  Henry Spencer.
+# 
+# This program is free software; you can redistribute it and/or modify it
+# under the terms of the GNU General Public License as published by the
+# Free Software Foundation; either version 2 of the License, or (at your
+# option) any later version.  See <http://www.fsf.org/copyleft/gpl.txt>.
+# 
+# This program is distributed in the hope that it will be useful, but
+# WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+# or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+# for more details.
+
+me='ipsec auto'
+usage="Usage:
+        $me [--asynchronous] --up connectionname
+        $me --{add|delete|replace|down} connectionname
+        $me --{route|unroute} connectionname
+        $me --{ready|status|rereadsecrets|rereadgroups}
+        $me --{rereadcacerts|rereadaacerts|rereadocspcerts}
+        $me --{rereadacerts|rereadcrls|rereadall}
+        $me [--utc] --{listpubkeys|listcerts}
+        $me [--utc] --checkpubkeys
+        $me [--utc] --{listcacerts|listaacerts|listocspcerts}
+        $me [--utc] --{listacerts|listgroups}
+        $me [--utc] --{listcrls|listocsp|listall}
+        $me --purgeocsp
+
+other options: [--config ipsecconfigfile]"
+
+showonly=
+config=
+info=/var/run/pluto/ipsec.info
+shopts=
+async=
+op=
+argc=
+utc=
+
+for dummy
+do
+	case "$1" in
+	--help)		echo "$usage" ; exit 0	;;
+	--version)	echo "$me $IPSEC_VERSION" ; exit 0	;;
+	--show)		echo "--show     is no longer supported";;
+	--showonly)	echo "--showonly is no longer supported";;
+	--utc)		utc="$1"		;;
+	--config)	config="--config $2" ; shift	;;
+	--asynchronous)	async="--asynchronous"	;;
+	--up|--down|--add|--delete|--replace|--route|--unroute)
+			if test " $op" != " "
+			then
+				echo "$usage" >&2
+				exit 2
+			fi
+			op="$1"
+			argc=1
+			;;
+	--ready|--status|--rereadsecrets|--rereadgroups|\
+        --rereadcacerts|--rereadaacerts|--rereadocspcerts|\
+        --rereadacerts|--rereadcrls|--rereadall|\
+        --listpubkeys|--listcerts|\
+        --checkpubkeys|\
+        --listcacerts|--listaacerts|--listocspcerts|\
+        --listacerts|--listgroups|\
+        --listcrls|--listocsp|--listall|\
+        --purgeocsp)
+			if test " $op" != " "
+			then
+				echo "$usage" >&2
+				exit 2
+			fi
+			op="$1"
+			argc=0
+			;;
+	--)		shift ; break		;;
+	-*)		echo "$me: unknown option \`$1'" >&2 ; exit 2 ;;
+	*)		break			;;
+	esac
+	shift
+done
+
+names=
+case "$op$#:$1:$2" in
+2:*:up|2:*:down|2:*:add|2:*:delete|2:*:replace|2:*:route|2:*:unroute)
+		echo "$me: warning: obsolete command syntax used" >&2
+		names="$1"
+		op="--$2"
+		;;
+1:ready:|1:status:|1:rereadsecrets:|\
+1:rereadcacerts:|1:rereadaacerts:|1:rereadocspcerts:|\
+1:rereadacerts:|1:rereadcrls:|1:rereadall:\
+1:listpubkeys:|1:listcerts:|\
+1:listcacerts:|1:listaacerts:|1:listocspcerts:|\
+1:listacerts:|1:listgroups:|\
+1:listcrls:|1:listocsp:|1:listall:|1:purgeocsp:)
+		echo "$me: warning: obsolete command syntax used" >&2
+		op="--$1"
+		;;
+--*)		if test " $argc" -ne $#
+		then
+			echo "$usage" >&2
+			exit 2
+		fi
+		names="$*"
+		;;
+*)		echo "$usage" >&2 ; exit 2	;;
+esac
+
+case "$op" in
+--ready)          ipsec whack --listen            ; exit ;;
+--rereadsecrets)  ipsec whack --rereadsecrets     ; exit ;;
+--rereadgroups)   ipsec whack --listen            ; exit ;;
+--rereadcacerts)  ipsec whack --rereadcacerts     ; exit ;;
+--rereadaacerts)  ipsec whack --rereadaacerts     ; exit ;;
+--rereadocspcerts)ipsec whack --rereadocspcerts   ; exit ;;
+--rereadacerts)   ipsec whack --rereadacerts      ; exit ;;
+--rereadcrls)     ipsec whack --rereadcrls        ; exit ;;
+--rereadall)      ipsec whack --rereadall         ; exit ;;
+--listpubkeys)    ipsec whack $utc --listpubkeys  ; exit ;;
+--checkpubkeys)   ipsec whack $utc --checkpubkeys ; exit ;;
+--listcerts)      ipsec whack $utc --listcerts    ; exit ;;
+--listcacerts)    ipsec whack $utc --listcacerts  ; exit ;;
+--listaacerts)    ipsec whack $utc --listaacerts  ; exit ;;
+--listocspcerts)  ipsec whack $utc --listocspcerts; exit ;;
+--listacerts)     ipsec whack $utc --listacerts   ; exit ;;
+--listgroups)     ipsec whack $utc --listgroups   ; exit ;;
+--listcrls)       ipsec whack $utc --listcrls     ; exit ;;
+--listocsp)       ipsec whack $utc --listocsp     ; exit ;;
+--listall)        ipsec whack $utc --listall      ; exit ;;
+--purgeocsp)      ipsec whack $utc --purgeocsp    ; exit ;;
+--up)             ipsec whack $async --name $names --initiate; exit ;;
+--down)           ipsec whack --name $names --terminate; exit ;;
+--delete)         ipsec whack --name $names --delete  ; exit ;;
+--route)          ipsec whack --name $names --route   ; exit ;;
+--unroute)        ipsec whack --name $names --unroute  ; exit ;;
+--status)         ipsec whack --status            ; exit ;;
+esac
+
+if test -s $info
+then
+	. $info
+fi
+
+# finally, handle --add|--replace
+if [ -n "$defaultrouteaddr" ]
+then
+    options="--defaultroute $defaultrouteaddr"
+fi
+if [ -n "$defaultroutenexthop" ]
+then
+    options="$options --defaultroutenexthop $defaultroutenexthop"
+fi
+ipsec addconn $config $options $names
+
+
+
+

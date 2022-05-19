@@ -1,0 +1,375 @@
+/* Support of X.509 keys
+ * Copyright (C) 2000 Andreas Hess, Patric Lichtsteiner, Roger Wegmann
+ * Copyright (C) 2001 Marco Bertossa, Andreas Schleiss
+ * Copyright (C) 2002 Mario Strasser
+ * Copyright (C) 2000-2004 Andreas Steffen, Zuercher Hochschule Winterthur
+ * Copyright (C) 2004-2007 Michael Richardson <mcr@xelerance.com>
+ * Copyright (C) 2006 Matthias Haas" <mh@pompase.net>
+ * Copyright (C) 2007-2010 Paul Wouters <paul@xelerance.com>
+ * Copyright (C) 2008 Antony Antony <antony@xelerance.com>
+ *
+ * This program is free software; you can redistribute it and/or modify it
+ * under the terms of the GNU General Public License as published by the
+ * Free Software Foundation; either version 2 of the License, or (at your
+ * option) any later version.  See <http://www.fsf.org/copyleft/gpl.txt>.
+ *
+ * This program is distributed in the hope that it will be useful, but
+ * WITHOUT ANY WARRANTY; without even the implied warranty of MERCHANTABILITY
+ * or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU General Public License
+ * for more details.
+ *
+ */
+
+#include <stdlib.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+#include <dirent.h>
+#include <time.h>
+#include <sys/types.h>
+
+#include <openswan.h>
+#include <openswan/ipsec_policy.h>
+
+#include "sysdep.h"
+#include "constants.h"
+#include "oswlog.h"
+
+#include "defs.h"
+#include "log.h"
+#include "id.h"
+#include "asn1.h"
+#include "oid.h"
+#include "x509.h"
+#include "pgp.h"
+#include "certs.h"
+#include "keys.h"
+#include "packet.h"
+#include "demux.h"	/* needs packet.h */
+#include "pluto/connections.h"
+#include "hostpair.h"
+#include "state.h"
+#include "md2.h"
+#include "md5.h"
+#include "sha1.h"
+#include "whack.h"
+#include "fetch.h"
+#include "ocsp.h"
+#include "pkcs.h"
+#include "kernel.h"
+#include "x509more.h"
+
+/*
+ * Decode the CERT payload of Phase 1.
+ */
+void
+decode_cert(struct msg_digest *m  d)
+{
+    struct payload_digest *p;
+
+    for (p = md->chain[ISAKMP_NEXT_CERT]; p != NULL; p = p->next)
+    {
+	struct isakmp_cert *const cert = &p->payload.cert;
+	chunk_t blob;
+	time_t valid_until;
+	blob.ptr = p->pbs.cur;/*证书的内容部分*/
+	blob.len = pbs_left(&p->pbs);
+	if (cert->isacert_type == CERT_X509_SIGNATURE)
+	{
+	    x509cert_t cert2 = empty_x509cert;
+	    if (parse_x509cert(blob, 0, &cert2))/**/
+	    {
+		if (verify_x509cert(&cert2, strict_crl_policy, &valid_until))
+		{
+		    DBG(DBG_X509 | DBG_PARSING,
+			DBG_log("Public key validated")
+		    )
+			add_x509_public_key(NULL, &cert2, valid_until, DAL_SIGNED);
+		}
+		else
+		{
+		    plog("X.509 certificate rejected");
+		}
+		free_generalNames(cert2.subjectAltName, FALSE);
+		free_generalNames(cert2.crlDistributionPoints, FALSE);
+	    }
+	    else
+		plog("Syntax error in X.509 certificate");
+	}
+	else if (cert->isacert_type == CERT_PKCS7_WRAPPED_X509)
+	{
+	    x509cert_t *cert2 = NULL;
+
+	    if (parse_pkcs7_cert(blob, &cert2))
+		store_x509certs(&cert2, strict_crl_policy);
+	    else
+		plog("Syntax error in PKCS#7 wrapped X.509 certificates");
+	}
+	else
+	{
+	    loglog(RC_LOG_SERIOUS, "ignoring %s certificate payload",
+		   enum_show(&cert_type_names, cert->isacert_type));
+	    DBG_cond_dump_chunk(DBG_PARSING, "CERT:\n", blob);
+	}
+    }
+}
+
+/* Decode IKEV2 CERT Payload */
+
+void
+ikev2_decode_cert(struct msg_digest *md)
+{
+    struct payload_digest *p;
+    unsigned certnum = 0;
+
+    for (p = md->chain[ISAKMP_NEXT_v2CERT]; p != NULL; p = p->next)
+    {
+	struct ikev2_cert *const v2cert = &p->payload.v2cert;
+	chunk_t blob;
+	time_t valid_until;
+	blob.ptr = p->pbs.cur;
+	blob.len = pbs_left(&p->pbs);
+	if (v2cert->isac_enc == CERT_X509_SIGNATURE)
+	{
+	    x509cert_t cert2 = empty_x509cert;
+	    if (parse_x509cert(blob, 0, &cert2))
+	    {
+		if (verify_x509cert(&cert2, strict_crl_policy, &valid_until))
+		{
+                    char sbuf[ASN1_BUF_LEN];
+                    dntoa(sbuf, ASN1_BUF_LEN, cert2.subject);
+                    openswan_log("%u: validated X509 certificate: '%s', added to trusted database"
+                                 , certnum, sbuf);
+		    DBG(DBG_X509 | DBG_PARSING,
+			DBG_log("Public key validated")
+                        );
+                    add_x509_public_key(NULL, &cert2, valid_until, DAL_SIGNED);
+		}
+		else
+		{
+		    plog("X.509 certificate rejected");
+		}
+		free_generalNames(cert2.subjectAltName, FALSE);
+		free_generalNames(cert2.crlDistributionPoints, FALSE);
+	    }
+	    else
+		plog("Syntax error in X.509 certificate");
+	}
+	else if (v2cert->isac_enc == CERT_PKCS7_WRAPPED_X509)
+	{
+	    x509cert_t *cert2 = NULL;
+
+	    if (parse_pkcs7_cert(blob, &cert2)) {
+                char sbuf[ASN1_BUF_LEN];
+                dntoa(sbuf, ASN1_BUF_LEN, cert2->subject);
+                openswan_log("%u: validated pkcs7 certificate: '%s', added to trusted database"
+                             , certnum, sbuf);
+		store_x509certs(&cert2, strict_crl_policy);
+            }
+	    else
+		plog("Syntax error in PKCS#7 wrapped X.509 certificates");
+	}
+	else
+	{
+	    loglog(RC_LOG_SERIOUS, "%u: ignoring %s certificate payload"
+                   , certnum
+		   , enum_show(&ikev2_cert_type_names, v2cert->isac_enc));
+	    DBG_cond_dump_chunk(DBG_PARSING, "CERT:\n", blob);
+	}
+
+        certnum++;
+    }
+}
+
+
+
+/*
+ * Decode the CR payload of Phase 1.
+ *
+ *
+ *	解析收到的报文中的证书请求载荷
+ *
+ */
+void
+decode_cr(struct msg_digest *md, generalName_t **requested_ca)
+{
+    struct payload_digest *p;
+
+    for (p = md->chain[ISAKMP_NEXT_CR]; p != NULL; p = p->next)
+    {
+	struct isakmp_cr *const cr = &p->payload.cr;
+	chunk_t ca_name;
+
+	ca_name.len = pbs_left(&p->pbs);
+	ca_name.ptr = (ca_name.len > 0)? p->pbs.cur : NULL;
+
+	DBG_cond_dump_chunk(DBG_PARSING, "CR", ca_name);
+
+	if (cr->isacr_type == CERT_X509_SIGNATURE)
+	{
+
+	    if (ca_name.len > 0)
+	    {
+		generalName_t *gn;
+
+		if (!is_asn1(ca_name))/*必须为ASN编码格式*/
+		    continue;
+
+		gn = alloc_thing(generalName_t, "generalName");
+		clonetochunk(ca_name, ca_name.ptr,ca_name.len, "ca name");
+		gn->kind = GN_DIRECTORY_NAME;
+		gn->name = ca_name;
+		gn->next = *requested_ca;
+		*requested_ca = gn;
+	    }
+
+	    DBG(DBG_PARSING | DBG_CONTROL,
+		char buf[IDTOA_BUF];
+		dntoa_or_null(buf, IDTOA_BUF, ca_name, "%any");
+		DBG_log("requested CA: '%s'", buf);
+	    )
+	}
+	else
+	    loglog(RC_LOG_SERIOUS, "ignoring %s certificate request payload",
+		   enum_show(&cert_type_names, cr->isacr_type));
+    }
+}
+
+/*
+ * Decode the IKEv2 CR payload of Phase 1.
+ */
+void
+ikev2_decode_cr(struct msg_digest *md, generalName_t **requested_ca)
+{
+    struct payload_digest *p;
+
+    for (p = md->chain[ISAKMP_NEXT_v2CERTREQ]; p != NULL; p = p->next)
+    {
+	struct ikev2_certreq *const cr = &p->payload.v2certreq;
+	chunk_t ca_name;
+
+	ca_name.len = pbs_left(&p->pbs);
+	ca_name.ptr = (ca_name.len > 0)? p->pbs.cur : NULL;
+
+	DBG_cond_dump_chunk(DBG_PARSING, "CR", ca_name);
+
+	if (cr->isacertreq_enc == CERT_X509_SIGNATURE)
+	{
+
+	    if (ca_name.len > 0)
+	    {
+		generalName_t *gn;
+
+		if (!is_asn1(ca_name))
+		    continue;
+
+		gn = alloc_thing(generalName_t, "generalName");
+		clonetochunk(ca_name, ca_name.ptr,ca_name.len, "ca name");
+		gn->kind = GN_DIRECTORY_NAME;
+		gn->name = ca_name;
+		gn->next = *requested_ca;
+		*requested_ca = gn;
+	    }
+
+	    DBG(DBG_PARSING | DBG_CONTROL,
+		char buf[IDTOA_BUF];
+		dntoa_or_null(buf, IDTOA_BUF, ca_name, "%any");
+		DBG_log("requested CA: '%s'", buf);
+	    )
+	}
+	else
+	    loglog(RC_LOG_SERIOUS, "ignoring %s certificate request payload",
+		   enum_show(&ikev2_cert_type_names, cr->isacertreq_enc));
+    }
+}
+
+bool
+build_and_ship_CR(u_int8_t type, chunk_t ca, pb_stream *outs, u_int8_t np)
+{
+    pb_stream cr_pbs;
+    struct isakmp_cr cr_hd;
+    cr_hd.isacr_np = np;
+    cr_hd.isacr_type = type;
+
+    /* build CR header */
+    if (!out_struct(&cr_hd, &isakmp_ipsec_cert_req_desc, outs, &cr_pbs))
+	return FALSE;
+
+    if (ca.ptr != NULL)
+    {
+	/* build CR body containing the distinguished name of the CA */
+	if (!out_chunk(ca, &cr_pbs, "CA"))
+	    return FALSE;
+    }
+    close_output_pbs(&cr_pbs);
+    return TRUE;
+}
+
+bool
+ikev2_build_and_ship_CR(u_int8_t type, chunk_t ca, pb_stream *outs, u_int8_t np)
+{
+    pb_stream cr_pbs;
+    struct ikev2_certreq  cr_hd;
+    cr_hd.isacertreq_critical =  ISAKMP_PAYLOAD_NONCRITICAL;
+    cr_hd.isacertreq_np= np;
+    cr_hd.isacertreq_enc = type;
+
+    /* build CR header */
+    if (!out_struct(&cr_hd, &ikev2_certificate_req_desc, outs, &cr_pbs))
+	return FALSE;
+
+    if (ca.ptr != NULL)
+    {
+	/* build CR body containing the distinguished name of the CA */
+	if (!out_chunk(ca, &cr_pbs, "CA"))
+	    return FALSE;
+    }
+    close_output_pbs(&cr_pbs);
+    return TRUE;
+}
+
+/*获取连接下所有的可用证书*/
+bool
+collect_rw_ca_candidates(struct msg_digest *md, generalName_t **top)
+{
+    struct connection *d = find_host_connection(ANY_MATCH, &md->iface->ip_addr
+                                                , pluto_port500
+                                                , KH_ANY
+                                                ,(ip_address*)NULL, md->sender_port, LEMPTY, LEMPTY, NULL);
+
+    for (; d != NULL; d = d->IPhp_next)
+    {
+	/* must be a road warrior connection */
+	if (d->kind == CK_TEMPLATE && !(d->policy & POLICY_OPPO)
+	&& d->spd.that.ca.ptr != NULL)
+	{
+	    generalName_t *gn;
+	    bool new_entry = TRUE;
+
+	    for (gn = *top; gn != NULL; gn = gn->next)
+	    {
+		if (same_dn(gn->name, d->spd.that.ca))/*重复证书不加载*/
+		{
+		    new_entry = FALSE;
+		    break;
+		}
+	    }
+	    if (new_entry)/*将可用证书加到链表上*/
+	    {
+		gn = alloc_thing(generalName_t, "generalName");
+		gn->kind = GN_DIRECTORY_NAME;
+		gn->name = d->spd.that.ca;
+		gn->next = *top;
+		*top = gn;
+	    }
+	}
+    }
+    return *top != NULL;
+}
+
+/*
+ * Local Variables:
+ * c-basic-offset:4
+ * c-style: pluto
+ * End:
+ */

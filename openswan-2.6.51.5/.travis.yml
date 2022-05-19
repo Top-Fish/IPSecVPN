@@ -1,0 +1,69 @@
+os:
+  - linux
+
+language: c
+compiler:
+  - gcc
+
+env:
+  matrix:
+    - BUILD_HISTORY_REVS=true
+    - BUILD_HISTORY_REVS=false
+
+sudo: false
+addons:
+  apt:
+    packages:
+      - make
+      - flex
+      - bison
+      - python-minimal
+      - libgmp-dev
+      - libgmp3-dev
+      - libpcap0.8-dev
+      - libpcap0.8
+      - electric-fence
+      - gcc-multilib
+      - tcpdump
+      - libnspr4-dev
+      - libnss3-dev
+
+cache:
+  directories:
+  - $HOME/stuff
+  - $HOME/.ccache
+
+env:
+  global:
+    - IPSECVERSION=0.0.0
+    - BUILD_ARCH=amd64
+  matrix:
+    - BUILD_HISTORY_REVS=false
+    - BUILD_HISTORY_REVS=true
+
+
+# remove the oracle junk, because it otherwise gets updated, and we do not care about it.
+before_install:
+  - if [ -z "$TRAVIS_OS_NAME" ]; then TRAVIS_OS_NAME=linux; fi
+  - if [ "$TRAVIS_OS_NAME" = osx ]; then brew update; fi
+
+before_script:
+  - tests/utils/testsetup.sh
+  - "PATH=$HOME/stuff/sbin:$PATH export PATH"
+  - which tcpdump
+
+install:
+  - if [ "$TRAVIS_OS_NAME" = osx ]; then brew install libpcap libgmp flex bison; fi
+  - "PATH=$HOME/stuff/sbin:/usr/lib/ccache:$PATH export PATH"
+  - "echo WERROR=-Werror >Makefile.inc.local"
+  - "echo ARCH=${BUILD_ARCH}   >>Makefile.inc.local"
+  - if [ "$BUILD_ARCH" = i386 ]; then echo "USERLINKEXTRA=-m32" >>Makefile.inc.local; echo "USERCOMPILEEXTRA=-m32" >>Makefile.inc.local; fi
+
+script:
+  - export PATH=$PATH:$HOME/stuff/bin
+  - "cat Makefile.inc.local"
+  - "make env | sort -f"
+  - git --version
+  - "[ \"$BUILD_HISTORY_REVS\" = true ] || make programs ARCH=${BUILD_ARCH} LIBEFENCE="
+  - "[ \"$BUILD_HISTORY_REVS\" = true ] || make check ARCH=${BUILD_ARCH} LIBEFENCE="
+  - "[ \"$BUILD_HISTORY_REVS\" = false ] || tests/utils/build-every-version"
